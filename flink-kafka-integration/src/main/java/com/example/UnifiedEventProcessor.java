@@ -2,101 +2,136 @@ package com.example;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.util.Collector;
 
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Properties;
 
 public class UnifiedEventProcessor {
+    private static final long EXPIRY_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
     public static void main(String[] args) throws Exception {
-        // Set up the execution environment
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-        // Set a parallelism for better debugging
         env.setParallelism(1);
 
-        // Kafka properties
         Properties kafkaProps = new Properties();
         kafkaProps.setProperty("bootstrap.servers", "kafka:9092");
         kafkaProps.setProperty("group.id", "event-processor");
-        kafkaProps.setProperty("auto.offset.reset", "earliest"); // Ensure processing from the start
+        kafkaProps.setProperty("auto.offset.reset", "earliest");
 
-        // Kafka consumer
         FlinkKafkaConsumer<String> kafkaConsumer = new FlinkKafkaConsumer<>(
             "event-topic",
             new SimpleStringSchema(),
             kafkaProps
         );
 
-        // Data stream
         DataStream<String> eventStream = env.addSource(kafkaConsumer).name("Event Stream");
 
-        // Process events
         eventStream
-            .flatMap((String eventJson, Collector<String> out) -> {
-                ObjectMapper objectMapper = new ObjectMapper();
+            .keyBy(eventJson -> {
                 try {
-                    // Parse JSON event
-                    Map<String, Object> event = objectMapper.readValue(eventJson, Map.class);
-
-                    // Extract event type and process accordingly
-                    String eventType = (String) event.get("event_type");
-                    if (eventType == null) {
-                        out.collect("Error: Missing 'event_type' in event: " + eventJson);
-                        return;
-                    }
-
-                    switch (eventType) {
-                        case "visit":
-                            processVisitEvent(event, out);
-                            break;
-                        case "scroll":
-                            processScrollEvent(event, out);
-                            break;
-                        case "stay":
-                            processStayEvent(event, out);
-                            break;
-                        case "trigger":
-                            processTriggerEvent(event, out);
-                            break;
-                        default:
-                            out.collect("Unknown event type: " + eventType + ", Event: " + eventJson);
-                            break;
-                    }
+                    Map<String, Object> event = new ObjectMapper().readValue(eventJson, Map.class);
+                    return event.get("user_id").toString();
                 } catch (Exception e) {
-                    out.collect("Error processing event: " + e.getMessage() + ", Event: " + eventJson);
+                    return "unknown";
                 }
             })
-            .returns(TypeInformation.of(String.class)) // Ensure Flink knows the output type
-            .name("Event Processor")
-            .print("Event Output");
+            .process(new UserEventProcessor())
+            .name("User Event Processor")
+            .print();
 
-        // Execute Flink job
         env.execute("Unified Event Stream Processing");
     }
 
-    private static void processVisitEvent(Map<String, Object> event, Collector<String> out) {
-        // Handle visit event
-        out.collect("Processed visit event: " + event);
+    public static class UserEventProcessor extends KeyedProcessFunction<String, String, String> {
+        private transient MapState<String, Tuple> urlVisitCounts;
+
+        @Override
+        public void open(Configuration parameters) {
+            MapStateDescriptor<String, Tuple> descriptor = new MapStateDescriptor<>(
+                "urlVisitCounts",
+                TypeInformation.of(String.class),
+                TypeInformation.of(Tuple.class)
+            );
+            urlVisitCounts = getRuntimeContext().getMapState(descriptor);
+        }
+
+        @Override
+        public void processElement(String eventJson, Context ctx, Collector<String> out) throws Exception {
+            ObjectMapper objectMapper = new ObjectMapper();
+            Map<String, Object> event = objectMapper.readValue(eventJson, Map.class);
+
+            String eventType = (String) event.get("event_type");
+            String url = (String) event.get("url");
+            long eventTime = (long) event.get("time");
+
+            if ("visit".equals(eventType)) {
+                processVisitEvent(url, eventTime, ctx, out);
+            } else if ("trigger".equals(eventType)) {
+                processTriggerEvent(url, eventTime, ctx, out);
+            }
+
+            ctx.timerService().registerProcessingTimeTimer(ctx.timerService().currentProcessingTime() + 60 * 60 * 1000);
+        }
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+            long currentTime = System.currentTimeMillis();
+            Iterator<Map.Entry<String, Tuple>> iterator = urlVisitCounts.entries().iterator();
+
+            while (iterator.hasNext()) {
+                Map.Entry<String, Tuple> entry = iterator.next();
+                if (currentTime - entry.getValue().lastUpdatedTime > EXPIRY_THRESHOLD_MS) {
+                    iterator.remove();
+                }
+            }
+
+            out.collect("State cleanup complete for user: " + ctx.getCurrentKey());
+        }
+
+        private void processVisitEvent(String url, long eventTime, Context ctx, Collector<String> out) throws Exception {
+            Tuple tuple = urlVisitCounts.get(url);
+            if (tuple == null) {
+                tuple = new Tuple(0, 0);
+            }
+            tuple.count += 1;
+            tuple.lastUpdatedTime = eventTime;
+            urlVisitCounts.put(url, tuple);
+
+            out.collect("User: " + ctx.getCurrentKey() + ", URL: " + url + ", Visit Count: " + tuple.count);
+        }
+
+        private void processTriggerEvent(String url, long eventTime, Context ctx, Collector<String> out) throws Exception {
+            Tuple tuple = urlVisitCounts.get(url);
+            int visitCount = tuple == null ? 0 : tuple.count;
+
+            long currentTime = System.currentTimeMillis();
+            long latency = currentTime - eventTime;
+
+            out.collect("Processed trigger event for User: " + ctx.getCurrentKey() +
+                        ", URL: " + url +
+                        ", Visit Count: " + visitCount +
+                        ", Latency: " + latency + " ms");
+        }
     }
 
-    private static void processScrollEvent(Map<String, Object> event, Collector<String> out) {
-        // Handle scroll event
-        out.collect("Processed scroll event: " + event);
-    }
+    public static class Tuple {
+        public int count;
+        public long lastUpdatedTime;
 
-    private static void processStayEvent(Map<String, Object> event, Collector<String> out) {
-        // Handle stay event
-        out.collect("Processed stay event: " + event);
-    }
-
-    private static void processTriggerEvent(Map<String, Object> event, Collector<String> out) {
-        // Handle trigger event and perform backtracking
-        out.collect("Processed trigger event: " + event);
-        // Add your backtracking logic here
+        public Tuple(int count, long lastUpdatedTime) {
+            this.count = count;
+            this.lastUpdatedTime = lastUpdatedTime;
+        }
     }
 }

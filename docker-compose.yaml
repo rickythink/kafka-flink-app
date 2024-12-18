@@ -15,11 +15,14 @@ services:
     container_name: kafka
     ports:
       - "9092:9092"
+      - "9093:9093"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     depends_on:
       - zookeeper
@@ -27,14 +30,27 @@ services:
       - /bin/bash
       - -c
       - |
-        # Wait for Zookeeper and Kafka to fully start
-        sleep 20;
-        # Start Kafka server in the background
+        # Wait for Zookeeper to fully start
+        while ! nc -z zookeeper 2181; do sleep 1; done;
+        # Start Kafka server
         /etc/confluent/docker/run &
+        # Wait for Kafka to fully start
+        sleep 10;
         # Create the topic after Kafka is running
-        kafka-topics --create --topic event-topic --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1;
+        kafka-topics --create --topic event-topic --bootstrap-server kafka:9092 --partitions 1 --replication-factor 1;
         # Keep the container running
         tail -f /dev/null
+
+  kafdrop:
+    image: obsidiandynamics/kafdrop
+    container_name: kafdrop
+    ports:
+      - "9000:9000"
+    environment:
+      KAFKA_BROKERCONNECT: kafka:9092
+      JVM_OPTS: "-Xms32M -Xmx64M"
+    depends_on:
+      - kafka
 
   flink-jobmanager:
     image: flink:1.17

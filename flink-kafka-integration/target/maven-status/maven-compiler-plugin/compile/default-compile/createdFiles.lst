@@ -1,2 +1,4 @@
-com/example/UnifiedEventProcessor.class
 com/example/App.class
+com/example/UnifiedEventProcessor.class
+com/example/UnifiedEventProcessor$UserEventProcessor.class
+com/example/UnifiedEventProcessor$Tuple.class

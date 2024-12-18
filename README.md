@@ -18,4 +18,4 @@ mvn clean package
 # flink run job
 
 docker exec -it flink-jobmanager /bin/bash
-./bin/flink run ./jars/flink-kafka-integration-1.0.jar 
+./bin/flink run ./jars/[xyz].jar 

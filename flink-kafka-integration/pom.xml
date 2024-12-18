@@ -4,7 +4,7 @@
   <groupId>com.example</groupId>
   <artifactId>flink-kafka-integration</artifactId>
   <packaging>jar</packaging>
-  <version>1.0</version>
+  <version>1.0.2</version>
   <name>flink-kafka-integration</name>
   <url>http://maven.apache.org</url>
 
